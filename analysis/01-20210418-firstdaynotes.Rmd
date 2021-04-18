@@ -1,0 +1,117 @@
+---
+title: "First Day Notes"
+author: "Patrick Kimes"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    df_print: paged
+---
+
+# Outline
+
+Here we try out doing an analysis.
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(cowplot)
+library(bigrquery)
+library(ggbeeswarm)
+
+theme_set(theme_minimal())
+theme_x_rotate <- function(...) {
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1), ...)
+}
+
+## bigrquery issue: https://github.com/r-dbi/bigrquery/issues/395
+options(scipen = 20)
+```
+
+We will be querying from the same project and dataset on BigQuery.
+
+```{r}
+project <- "hst-953-2019"
+bq_auth(email = "patrick.kimes@gmail.com")
+```
+
+Data tables will be saved to a local directory for easier future access.
+
+```{r}
+bqdir <- file.path("..", "data", "bigquery")
+dir.create(bqdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+# Data
+
+## Cohort
+
+We don't care about notes, so we'll flatten this table and also obtain the
+length of stay for each admission.
+
+```{r}
+firstday_rds <- file.path(bqdir, "firstday.rds")
+if (file.exists(firstday_rds)) {
+    firstday <- readRDS(firstday_rds)
+} else {
+    query <- read_file(file.path("..", "sql", "20210417-firstnotes.sql"))
+    res <- bq_project_query(x = "hst-953-2019", query = query)
+    firstday <- bq_table_download(res, page_size = 1e3)
+    saveRDS(firstday, firstday_rds)
+}
+```
+
+Also filter out all visits without any first day notes.
+
+```{r}
+firstdaye_rds <- file.path(bqdir, "firstdaye.rds")
+if (file.exists(firstdaye_rds)) {
+    firstdaye <- readRDS(firstdaye_rds)
+} else {
+    firstdaye <- firstday %>%
+        dplyr::filter(!is.na(CHARTDATE))
+    saveRDS(firstdaye, firstdaye_rds)
+}
+```
+
+# Plots
+
+Count up number of notes.
+
+```{r, fig.width = 6, fig.height = 3.5}
+firstday %>%
+    dplyr::group_by(SUBJECT_ID, HADM_ID) %>%
+    dplyr::summarize(nnotes = sum(!is.na(CHARTDATE))) %>%
+    dplyr::ungroup() %>%
+    dplyr::count(nnotes, name = "nadmit") %>% 
+    dplyr::arrange(nnotes)
+    
+firstday %>%
+    dplyr::group_by(SUBJECT_ID, HADM_ID) %>%
+    dplyr::summarize(n = sum(!is.na(CHARTDATE))) %>%
+    dplyr::ungroup() %>% 
+    ggplot(aes(x = n)) +
+    geom_histogram(boundary = 1/2, binwidth = 1,
+                   color = 'white', fill = 'gray20') +
+    xlab("number of notes") +
+    ylab("number of admissions") + 
+    ggtitle("First day notes per admission")
+
+firstdaye %>%
+    dplyr::count(SUBJECT_ID, HADM_ID) %>%
+    ggplot(aes(x = n)) +
+    geom_histogram(boundary = 1/2, binwidth = 1,
+                   color = 'white', fill = 'gray20') +
+    xlab("number of notes") +
+    ylab("number of admissions") + 
+    ggtitle("First day notes")
+```
+
+Check age.
+
+```{r}
+firstdaye %>%
+    dplyr::count(AVG_OASIS_AGE >= 18)
+```
+
