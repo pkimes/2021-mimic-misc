@@ -1,0 +1,167 @@
+---
+title: "First Day Notes"
+author: "Patrick Kimes"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    df_print: paged
+---
+
+# Outline
+
+Here we try out doing an analysis.
+
+```{r}
+library(tidyverse)
+library(bigrquery)
+
+theme_set(theme_minimal())
+theme_x_rotate <- function(...) {
+    theme(axis.text.x = element_text(angle = 90, vjust = 1/2, hjust = 1), ...)
+}
+
+## bigrquery issue: https://github.com/r-dbi/bigrquery/issues/395
+options(scipen = 20)
+```
+
+We will be querying from the same project and dataset on BigQuery.
+
+```{r}
+project <- "hst-953-2019"
+bq_auth(email = "patrick.kimes@gmail.com")
+```
+
+Data tables will be saved to a local directory for easier future access.
+
+```{r}
+bqdir <- file.path("..", "data", "bigquery")
+dir.create(bqdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+# Data
+
+Need time of ICU stay in/out to match with notes.
+
+```{r}
+query <- "
+SELECT SUBJECT_ID, HADM_ID, CHARTTIME, CATEGORY
+FROM `physionet-data.mimiciii_notes.noteevents`
+"
+res <- bq_project_query(x = "hst-953-2019", query = query)
+notetimes <- bq_table_download(res, page_size = 1e4)
+```
+
+Need ICU in/out times.
+
+```{r}
+query <- "
+SELECT ICUSTAY_ID, HADM_ID, INTIME, OUTTIME
+FROM `physionet-data.mimiciii_clinical.icustays`
+"
+res <- bq_project_query(x = "hst-953-2019", query = query)
+icutimes <- bq_table_download(res, page_size = 1e4)
+```
+
+Read in table of IDs that people are asking about.
+
+```{r}
+intab <- read_csv(file.path("..", "data", "external", "transfusion_ids.csv"),
+                  col_types = cols())
+```
+
+Only use some columns of their table.
+
+```{r}
+intab <- intab %>%
+    dplyr::select(-transfusedmarker,
+                  -charttime, -chartdate) %>%
+    dplyr::rename_all(toupper)
+```
+
+Add ICU in/out times.
+
+```{r}
+intab <- intab %>%
+    dplyr::left_join(icutimes, by = c("ICUSTAY_ID", "HADM_ID"))
+```
+
+## HADM_ID level compare
+
+Look for notes over these windows.
+
+```{r}
+noteset <- notetimes %>%
+    dplyr::left_join(intab, by = c("HADM_ID")) %>%
+    dplyr::filter(!is.na(CHARTTIME)) %>%
+    dplyr::filter(!is.na(HAS.NOTES)) %>%
+    dplyr::filter(dplyr::between(CHARTTIME, INTIME, OUTTIME))
+
+noteset %>%
+    dplyr::count(HADM_ID, ICUSTAY_ID)
+```
+
+Not many.
+
+# HADM_ID level compare
+
+This table is by ICU stay. Notes are by subject ID. Just summarize.
+
+```{r}
+intab %>%
+    dplyr::group_by(HADM_ID) %>%
+    dplyr::filter(n() > 1L)
+```
+
+Interestingly, hospital admission IDs are unique.. So we'll just ignore
+the ICU stay IDs and take the columns we care about.
+
+```{r}
+intab <- intab %>%
+    dplyr::mutate(has.notes = as.logical(has.notes),
+                  hadm_id = as.numeric(hadm_id)) %>%
+    dplyr::select(HADM_ID = hadm_id, has.notes)
+```
+
+Now check if really have no notes.
+
+```{r}
+comparetab <- intab %>%
+    dplyr::select(HADM_ID, HAS.NOTES) %>%
+    dplyr::left_join(nnotes, by = "HADM_ID") %>%
+    dplyr::mutate(N = TRUE) %>%
+    tidyr::complete(nesting(HADM_ID, SUBJECT_ID, HAS.NOTES),
+                    CATEGORY,
+                    fill = list(N = FALSE)) %>%
+    dplyr::filter(!is.na(CATEGORY)) 
+
+comparetab %>%
+    dplyr::group_by(CATEGORY) %>%
+    dplyr::summarize(agree = mean(HAS.NOTES == N))
+```
+
+Even at the HADM_ID level, no agreement.
+
+```{r}
+comparetab %>%
+    dplyr::group_by(HADM_ID, SUBJECT_ID, HAS.NOTES) %>%
+    dplyr::summarize(ACTUAL.NOTES = any(N)) %>%
+    dplyr::ungroup() %>%
+    dplyr::count(HAS.NOTES, ACTUAL.NOTES)
+```
+
+Again, not the right agreement.
+
+Check other class of notes.
+
+```{r}
+comparetab %>%
+    dplyr::filter(CATEGORY %in% c("Physician ", "Nursing",
+                                  "Discharge summary",
+                                  "Nursing/other")) %>%
+    dplyr::group_by(HADM_ID, SUBJECT_ID, HAS.NOTES) %>%
+    dplyr::summarize(ACTUAL.NOTES = any(N)) %>%
+    dplyr::ungroup() %>%
+    dplyr::count(HAS.NOTES, ACTUAL.NOTES)
+```
